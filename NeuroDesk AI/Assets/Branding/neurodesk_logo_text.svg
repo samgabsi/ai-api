@@ -1,0 +1,7 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'>
+<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+<stop offset='0%' stop-color='#00FFFF'/><stop offset='100%' stop-color='#A259FF'/></linearGradient></defs>
+<polygon points='350,340 470,400 470,560 350,620 230,560 230,400' stroke='url(#g)' stroke-width='16' fill='none'/>
+<text x='540' y='560' font-size='140' font-family='Arial' font-weight='bold' fill='#00FFFF'>NeuroDesk</text>
+<text x='540' y='700' font-size='130' font-family='Arial' font-weight='bold' fill='#A259FF'>AI</text>
+</svg>
