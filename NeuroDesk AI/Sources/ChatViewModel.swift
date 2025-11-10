@@ -11,6 +11,9 @@ final class ChatViewModel: ObservableObject {
     @Published var lastErrorMessage: String?
     @Published var apiKeyPresent: Bool = false
 
+    // Model selection (wired to SettingsView later)
+    @Published var selectedModel: String = "gpt-4o-mini"
+
     // Rate limit state exposed to UI (server-truth if available)
     @Published var rateLimitLimit: Int?
     @Published var rateLimitRemaining: Int?
@@ -43,10 +46,11 @@ final class ChatViewModel: ObservableObject {
 
     private let client: OpenAIClient
     private var streamingTask: Task<Void, Never>?
-    private var saveTask: Task<Void, Never>?
 
+    // Streaming flush configuration
     private let chunkFlushSize = 40
     private let punctuationSet = CharacterSet(charactersIn: ".!?,;:\n")
+    private let chunkFlushInterval: TimeInterval = 0.15 // time-based flush
 
     // Persistence keys for fallback
     private let fallbackStoreKey = "RateFallback.Store"
@@ -62,6 +66,9 @@ final class ChatViewModel: ObservableObject {
         }
         return (dir ?? URL(fileURLWithPath: NSTemporaryDirectory())).appendingPathComponent("chat.json")
     }()
+
+    // History capping
+    private let maxMessagesStored = 1000 // keep history manageable
 
     init() {
         client = OpenAIClient(apiKeyProvider: {
@@ -104,18 +111,37 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func loadHistory() {
-        guard let data = try? Data(contentsOf: historyURL) else { return }
-        if let decoded = try? JSONDecoder().decode([ChatMessage].self, from: data), !decoded.isEmpty {
-            messages = decoded
+        do {
+            let data = try Data(contentsOf: historyURL)
+            let decoded = try JSONDecoder().decode([ChatMessage].self, from: data)
+            if !decoded.isEmpty {
+                messages = decoded
+            }
+        } catch {
+            // If corrupted, ignore and keep default system message
+            print("Failed to load history: \(error)")
         }
     }
 
     private func saveHistory() {
+        // Trim before save
+        trimHistoryIfNeeded()
         do {
             let data = try JSONEncoder().encode(messages)
             try data.write(to: historyURL, options: .atomic)
         } catch {
             print("Failed to save history: \(error)")
+        }
+    }
+
+    private func trimHistoryIfNeeded() {
+        guard messages.count > maxMessagesStored else { return }
+        // Keep the first system message if present, and the last N-1 messages
+        if let first = messages.first, first.role == "system" {
+            let tail = messages.suffix(maxMessagesStored - 1)
+            messages = [first] + tail
+        } else {
+            messages = Array(messages.suffix(maxMessagesStored))
         }
     }
 
@@ -136,14 +162,12 @@ final class ChatViewModel: ObservableObject {
             fallbackWindowEndsAt = store.windowEndsAt
             fallbackWindowSeconds = max(1, store.windowSeconds)
         } else {
-            // initialize a window starting now
             fallbackLimitInWindow = 60
             fallbackUsedInWindow = 0
             fallbackWindowSeconds = 60
             fallbackWindowEndsAt = Date().addingTimeInterval(TimeInterval(fallbackWindowSeconds))
             persistFallbackCounters()
         }
-        // Ensure window rolls if expired
         rollFallbackWindowIfNeeded()
     }
 
@@ -176,9 +200,8 @@ final class ChatViewModel: ObservableObject {
 
     // Public API to configure fallback in Settings
     func updateFallbackWindow(seconds: Int) {
-        let clamped = max(1, min(86_400, seconds)) // 1 sec to 1 day
+        let clamped = max(1, min(86_400, seconds))
         fallbackWindowSeconds = clamped
-        // Start a new window from now
         fallbackUsedInWindow = 0
         fallbackWindowEndsAt = Date().addingTimeInterval(TimeInterval(fallbackWindowSeconds))
         persistFallbackCounters()
@@ -229,12 +252,13 @@ final class ChatViewModel: ObservableObject {
 
             do {
                 try await self.client.preflightCheck()
+                if Task.isCancelled { return }
                 let outboundMessages = await MainActor.run { self.messages }
                 await MainActor.run { self.noteApiCallForFallback() }
 
-                let response = try await self.client.streamChat(model: "gpt-4o-mini", messages: outboundMessages, temperature: 0.2)
+                let response = try await self.client.streamChat(model: self.selectedModel, messages: outboundMessages, temperature: 0.2)
 
-                // Apply server rate info if present
+                // Apply server rate info if present; else clear to avoid stale display
                 await MainActor.run {
                     self.rateLimitLimit = response.rateLimit.limit
                     self.rateLimitRemaining = response.rateLimit.remaining
@@ -242,6 +266,7 @@ final class ChatViewModel: ObservableObject {
                 }
 
                 var buffer = ""
+                var lastFlushTime = Date()
 
                 @MainActor
                 func flushBufferOnMain() {
@@ -252,15 +277,17 @@ final class ChatViewModel: ObservableObject {
                         self.messages[idx] = current
                     }
                     buffer = ""
+                    lastFlushTime = Date()
                 }
 
                 for try await token in response.stream {
+                    if Task.isCancelled { break }
                     await MainActor.run {
                         buffer.append(token)
                         let bySize = buffer.count >= self.chunkFlushSize
-                        let lastChar = buffer.last
-                        let endsWithPunct = lastChar.map { String($0).rangeOfCharacter(from: self.punctuationSet) != nil } ?? false
-                        if bySize || endsWithPunct || token.hasSuffix("\n") {
+                        let endsWithPunct = buffer.last.map { String($0).rangeOfCharacter(from: self.punctuationSet) != nil } ?? false
+                        let byTime = Date().timeIntervalSince(lastFlushTime) >= self.chunkFlushInterval
+                        if bySize || endsWithPunct || token.hasSuffix("\n") || byTime {
                             flushBufferOnMain()
                         }
                     }
@@ -269,6 +296,12 @@ final class ChatViewModel: ObservableObject {
                 await MainActor.run {
                     if !buffer.isEmpty {
                         flushBufferOnMain()
+                    }
+                    // If no headers present (nil), clear server-truth to avoid stale display
+                    if self.rateLimitLimit == nil && self.rateLimitRemaining == nil && self.rateLimitReset == nil {
+                        self.rateLimitLimit = nil
+                        self.rateLimitRemaining = nil
+                        self.rateLimitReset = nil
                     }
                 }
             } catch {
@@ -311,12 +344,12 @@ final class ChatViewModel: ObservableObject {
 
             do {
                 try await self.client.preflightCheck()
+                if Task.isCancelled { return }
                 let outboundMessages = await MainActor.run { self.messages }
                 await MainActor.run { self.noteApiCallForFallback() }
 
-                let response = try await self.client.streamChat(model: "gpt-4o-mini", messages: outboundMessages, temperature: 0.2)
+                let response = try await self.client.streamChat(model: self.selectedModel, messages: outboundMessages, temperature: 0.2)
 
-                // Apply server rate info if present
                 await MainActor.run {
                     self.rateLimitLimit = response.rateLimit.limit
                     self.rateLimitRemaining = response.rateLimit.remaining
@@ -324,6 +357,7 @@ final class ChatViewModel: ObservableObject {
                 }
 
                 var buffer = ""
+                var lastFlushTime = Date()
 
                 @MainActor
                 func flushBufferOnMain() {
@@ -334,15 +368,17 @@ final class ChatViewModel: ObservableObject {
                         self.messages[idx] = current
                     }
                     buffer = ""
+                    lastFlushTime = Date()
                 }
 
                 for try await token in response.stream {
+                    if Task.isCancelled { break }
                     await MainActor.run {
                         buffer.append(token)
                         let bySize = buffer.count >= self.chunkFlushSize
-                        let lastChar = buffer.last
-                        let endsWithPunct = lastChar.map { String($0).rangeOfCharacter(from: self.punctuationSet) != nil } ?? false
-                        if bySize || endsWithPunct || token.hasSuffix("\n") {
+                        let endsWithPunct = buffer.last.map { String($0).rangeOfCharacter(from: self.punctuationSet) != nil } ?? false
+                        let byTime = Date().timeIntervalSince(lastFlushTime) >= self.chunkFlushInterval
+                        if bySize || endsWithPunct || token.hasSuffix("\n") || byTime {
                             flushBufferOnMain()
                         }
                     }
@@ -351,6 +387,11 @@ final class ChatViewModel: ObservableObject {
                 await MainActor.run {
                     if !buffer.isEmpty {
                         flushBufferOnMain()
+                    }
+                    if self.rateLimitLimit == nil && self.rateLimitRemaining == nil && self.rateLimitReset == nil {
+                        self.rateLimitLimit = nil
+                        self.rateLimitRemaining = nil
+                        self.rateLimitReset = nil
                     }
                 }
             } catch {
@@ -407,10 +448,7 @@ final class ChatViewModel: ObservableObject {
 
         // 2) Ask consent to send the derived command to ChatGPT for analysis
         let allowSendCommand = await promptComposerConsentToSendCommand(command: resolvedCommand)
-        if !allowSendCommand {
-            // Still run the command locally, but do not send the command text to ChatGPT.
-            // We’ll ask separately about sending output later.
-        } else {
+        if allowSendCommand {
             messages.append(ChatMessage(role: "user", content: "bash$ \(resolvedCommand)"))
         }
 
@@ -442,10 +480,8 @@ final class ChatViewModel: ObservableObject {
         // 5) Ask consent to send the raw output to ChatGPT for analysis
         let allowSendOutput = await promptComposerConsentToSendOutput(command: resolvedCommand, output: result.output)
         if allowSendOutput {
-            // Mirror the raw output into AI Response
             messages.append(ChatMessage(role: "user", content: result.output.isEmpty ? "(no output)" : result.output))
 
-            // 6) Send to ChatGPT for analysis and append assistant explanation
             let contextualized = """
             I ran the following shell command:
 
@@ -459,7 +495,6 @@ final class ChatViewModel: ObservableObject {
             """
             await appendAndSendUserMessage(contextualized)
         } else {
-            // If not allowed, show a brief note in the conversation or silently skip.
             messages.append(ChatMessage(role: "assistant", content: "Output was not sent for analysis as requested."))
         }
     }
@@ -475,7 +510,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func synthesizeBashCommand(from natural: String) async throws -> String {
-        // Temporarily disabled model synthesis; you can wire this to the model similarly to chat if desired.
+        // Placeholder: pass through if it looks like a command; otherwise echo it.
         let trimmed = natural.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return "echo 'No command provided'"
@@ -659,13 +694,11 @@ final class ChatViewModel: ObservableObject {
                 options: [.caseInsensitive]
             ) {
                 let ns = text as NSString
-                theRange: do {
-                    let range = NSRange(location: 0, length: ns.length)
-                    if let m = re.firstMatch(in: text, options: [], range: range), m.numberOfRanges >= 4 {
-                        if limit == nil { limit = Int(ns.substring(with: m.range(at: 1))) }
-                        if used == nil { used = Int(ns.substring(with: m.range(at: 2))) }
-                        if requested == nil { requested = Int(ns.substring(with: m.range(at: 3))) }
-                    }
+                let range = NSRange(location: 0, length: ns.length)
+                if let m = re.firstMatch(in: text, options: [], range: range), m.numberOfRanges >= 4 {
+                    if limit == nil { limit = Int(ns.substring(with: m.range(at: 1))) }
+                    if used == nil { used = Int(ns.substring(with: m.range(at: 2))) }
+                    if requested == nil { requested = Int(ns.substring(with: m.range(at: 3))) }
                 }
             }
         }
