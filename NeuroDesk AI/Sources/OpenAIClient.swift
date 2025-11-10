@@ -27,6 +27,24 @@ public enum OpenAIError: Error, LocalizedError {
     }
 }
 
+// Surface rate limit information parsed from headers when available.
+public struct RateLimitInfo: Sendable {
+    public let limit: Int?
+    public let remaining: Int?
+    public let reset: Date?
+
+    public init(limit: Int?, remaining: Int?, reset: Date?) {
+        self.limit = limit
+        self.remaining = remaining
+        self.reset = reset
+    }
+}
+
+public struct StreamResponse {
+    public let stream: AsyncThrowingStream<String, Error>
+    public let rateLimit: RateLimitInfo
+}
+
 public final class OpenAIClient {
     private let endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
     private let session: URLSession
@@ -42,7 +60,7 @@ public final class OpenAIClient {
         self.apiKeyProvider = apiKeyProvider
     }
 
-    public func streamChat(model: String, messages: [ChatMessage], temperature: Double = 0.2) async throws -> AsyncThrowingStream<String, Error> {
+    public func streamChat(model: String, messages: [ChatMessage], temperature: Double = 0.2) async throws -> StreamResponse {
         guard let apiKey = apiKeyProvider(), !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw OpenAIError.missingAPIKey
         }
@@ -70,7 +88,9 @@ public final class OpenAIClient {
                 throw OpenAIError.httpError(status: http.statusCode, body: body)
             }
 
-            return AsyncThrowingStream { continuation in
+            let rate = Self.parseRateLimit(from: http)
+
+            let stream = AsyncThrowingStream<String, Error> { continuation in
                 Task {
                     do {
                         for try await line in bytes.lines {
@@ -91,6 +111,8 @@ public final class OpenAIClient {
                     }
                 }
             }
+
+            return StreamResponse(stream: stream, rateLimit: rate)
         } catch {
             throw OpenAIError.networkError(underlying: error)
         }
@@ -102,4 +124,27 @@ public final class OpenAIClient {
         }
         print("[OpenAIClient] Using API key prefix: \(apiKey.prefix(8))")
     }
+
+    private static func parseRateLimit(from response: HTTPURLResponse) -> RateLimitInfo {
+        func intHeader(_ name: String) -> Int? {
+            if let v = response.value(forHTTPHeaderField: name) {
+                return Int(v.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return nil
+        }
+        func dateFromResetHeader(_ name: String) -> Date? {
+            if let v = response.value(forHTTPHeaderField: name), let ts = TimeInterval(v) {
+                return Date(timeIntervalSince1970: ts)
+            }
+            return nil
+        }
+
+        // Common names (varies by provider/plan)
+        let limit = intHeader("X-RateLimit-Limit") ?? intHeader("x-ratelimit-limit")
+        let remaining = intHeader("X-RateLimit-Remaining") ?? intHeader("x-ratelimit-remaining")
+        let reset = dateFromResetHeader("X-RateLimit-Reset") ?? dateFromResetHeader("x-ratelimit-reset")
+
+        return RateLimitInfo(limit: limit, remaining: remaining, reset: reset)
+    }
 }
+
