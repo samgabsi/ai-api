@@ -30,19 +30,19 @@ public enum NetworkTasks {
         
         var stdoutBuilder = ""
         var stderrBuilder = ""
-        
-        let (stream, exitCodeTask) = BashRunner.run(command: command, timeout: timeout, stdinData: nil)
-        
-        for await output in stream {
-            switch output {
-            case .stdout(let string):
-                stdoutBuilder.append(string)
-            case .stderr(let string):
-                stderrBuilder.append(string)
+
+        let handle = BashRunner.run(command: command, timeout: timeout, stdinData: nil)
+
+        for await chunk in handle.stream {
+            switch chunk.stream {
+            case .stdout:
+                stdoutBuilder.append(chunk.text)
+            case .stderr:
+                stderrBuilder.append(chunk.text)
             }
         }
-        
-        let exitCode = await exitCodeTask
+
+        let exitCode: Int32 = await handle.exitCodeTask.value
         
         // Detect if 'nmap' was not found
         let nmapNotFound =
@@ -66,8 +66,9 @@ public enum NetworkTasks {
     /// - Returns: `true` if `nmap` is found and executable; `false` otherwise.
     public static func isNmapAvailable(timeout: TimeInterval = 10) async -> Bool {
         let command = "command -v nmap"
-        let (_, exitCodeTask) = BashRunner.run(command: command, timeout: timeout, stdinData: nil)
-        let exitCode = await exitCodeTask
+        let handle = BashRunner.run(command: command, timeout: timeout, stdinData: nil)
+        for await _ in handle.stream { /* drain output, not needed here */ }
+        let exitCode: Int32 = await handle.exitCodeTask.value
         return exitCode == 0
     }
 }
