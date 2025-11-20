@@ -31,6 +31,7 @@ public final class CameraSessionController: NSObject, ObservableObject, AVCaptur
     @Published public var captureMode: CaptureMode = .photo
     @Published public private(set) var lastPhotoData: Data?
     @Published public private(set) var lastVideoURL: URL?
+    @Published public private(set) var isRecording: Bool = false
     
     public let session = AVCaptureSession()
     public let photoOutput = AVCapturePhotoOutput()
@@ -142,6 +143,10 @@ public final class CameraSessionController: NSObject, ObservableObject, AVCaptur
         
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         photoOutput.capturePhoto(with: settings, delegate: self)
+        // Update floating preview after capture
+        DispatchQueue.main.async {
+            self.isRecording = false
+        }
     }
     
     public func toggleRecording() {
@@ -150,6 +155,9 @@ public final class CameraSessionController: NSObject, ObservableObject, AVCaptur
         
         if movieOutput.isRecording {
             movieOutput.stopRecording()
+            DispatchQueue.main.async {
+                self.isRecording = false
+            }
         } else {
             let tempDir = FileManager.default.temporaryDirectory
             let dateStr = Self.dateFormatter.string(from: Date())
@@ -159,15 +167,21 @@ public final class CameraSessionController: NSObject, ObservableObject, AVCaptur
                 try? FileManager.default.removeItem(at: outputURL)
             }
             movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+            DispatchQueue.main.async {
+                self.isRecording = true
+            }
         }
     }
     
     // MARK: AVCapturePhotoCaptureDelegate
     
+}
+
+extension CameraSessionController: AVCapturePhotoCaptureDelegate {
     public func photoOutput(_ output: AVCapturePhotoOutput,
                             didFinishProcessingPhoto photo: AVCapturePhoto,
                             error: Error?) {
-        if let error = error {
+        if let _ = error {
             // ignore for now
             return
         }
@@ -177,9 +191,11 @@ public final class CameraSessionController: NSObject, ObservableObject, AVCaptur
             self.lastVideoURL = nil
         }
     }
-    
-    // MARK: AVCaptureFileOutputRecordingDelegate
-    
+}
+
+// MARK: AVCaptureFileOutputRecordingDelegate
+
+extension CameraSessionController {
     public func fileOutput(_ output: AVCaptureFileOutput,
                            didFinishRecordingTo outputFileURL: URL,
                            from connections: [AVCaptureConnection],
@@ -189,11 +205,14 @@ public final class CameraSessionController: NSObject, ObservableObject, AVCaptur
                 self.lastVideoURL = outputFileURL
                 self.lastPhotoData = nil
             }
+            self.isRecording = false
         }
     }
-    
-    // Date formatter for filenames
-    private static let dateFormatter: DateFormatter = {
+}
+
+// Date formatter for filenames
+extension CameraSessionController {
+    fileprivate static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -236,13 +255,52 @@ public struct CameraPreviewView: NSViewRepresentable {
     }
 }
 
-public struct WebcamCaptureSheet: View {
+// Floating window hosting utility
+public struct FloatingPreviewWindow: Identifiable {
+    public let id = UUID()
+    public let window: NSWindow
+}
+
+public final class FloatingPreviewController: NSObject, ObservableObject {
+    @Published public var isShown: Bool = false
+    private var hostingController: NSHostingController<AnyView>?
+    private var windowRef: NSWindow?
+    
+    public func show<Content: View>(@ViewBuilder content: () -> Content) {
+        let view = AnyView(content())
+        let host = NSHostingController(rootView: view)
+        let win = NSWindow(contentViewController: host)
+        win.title = "Camera Preview"
+        win.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+        win.isReleasedWhenClosed = false
+        win.level = .floating
+        win.setFrame(NSRect(x: 100, y: 100, width: 360, height: 240), display: true)
+        win.makeKeyAndOrderFront(nil)
+        self.hostingController = host
+        self.windowRef = win
+        self.isShown = true
+    }
+    
+    public func hide() {
+        windowRef?.orderOut(nil)
+        hostingController = nil
+        windowRef = nil
+        isShown = false
+    }
+    
+    public func update<Content: View>(@ViewBuilder content: () -> Content) {
+        hostingController?.rootView = AnyView(content())
+    }
+}
+
+public struct LegacyWebcamCaptureSheet: SwiftUI.View {
     @Binding var isPresented: Bool
     
     var onPhoto: (Data, String, String) -> Void
     var onVideo: (URL, String, String) -> Void
     
     @StateObject private var controller = CameraSessionController()
+    @StateObject private var floating = FloatingPreviewController()
     
     public init(isPresented: Binding<Bool>,
                 onPhoto: @escaping (Data, String, String) -> Void,
@@ -252,37 +310,47 @@ public struct WebcamCaptureSheet: View {
         self.onVideo = onVideo
     }
     
-    public var body: some View {
+    public var body: some SwiftUI.View {
         VStack(spacing: 12) {
             if !controller.isAuthorized {
                 VStack(spacing: 8) {
-                    Text("Camera access is required. Please grant permission in System Preferences → Security & Privacy → Privacy → Camera.")
+                    SwiftUI.Text("Camera access is required. Please grant permission in System Preferences → Security & Privacy → Privacy → Camera.")
                         .multilineTextAlignment(.center)
                         .padding()
-                    Button("Request Access") {
+                    SwiftUI.Button("Request Access") {
                         controller.requestAuthorization()
                     }
                 }
             } else {
                 VStack(spacing: 12) {
                     HStack {
-                        Picker("Camera", selection: $controller.selectedDeviceID) {
+                        SwiftUI.Picker("Camera", selection: $controller.selectedDeviceID) {
                             ForEach(controller.devices) { device in
-                                Text(device.device.localizedName).tag(device.id as String?)
+                                SwiftUI.Text(device.device.localizedName).tag(device.id as String?)
                             }
                         }
                         .frame(minWidth: 150)
-                        Picker("Mode", selection: $controller.captureMode) {
-                            Text("Photo").tag(CaptureMode.photo)
-                            Text("Video").tag(CaptureMode.video)
+                        SwiftUI.Picker("Mode", selection: $controller.captureMode) {
+                            SwiftUI.Text("Photo").tag(CaptureMode.photo)
+                            SwiftUI.Text("Video").tag(CaptureMode.video)
                         }
                         .pickerStyle(SegmentedPickerStyle())
                         .frame(width: 160)
+                        
+                        SwiftUI.Button(floating.isShown ? "Detach Preview" : "Attach Preview") {
+                            if !floating.isShown {
+                                floating.show {
+                                    previewStack
+                                }
+                            } else {
+                                floating.hide()
+                            }
+                        }
                         Spacer()
                     }
                     .padding(.horizontal)
                     
-                    CameraPreviewView(controller: controller)
+                    inlinePreview
                         .frame(minHeight: 240)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(
@@ -293,21 +361,27 @@ public struct WebcamCaptureSheet: View {
                     
                     HStack {
                         if controller.captureMode == .photo {
-                            Button("Capture Photo") {
+                            SwiftUI.Button("Capture Photo") {
                                 controller.capturePhoto()
+                                if floating.isShown {
+                                    floating.update { previewStack }
+                                }
                             }
                             .keyboardShortcut(.defaultAction)
                         } else {
-                            Button(controller.movieOutput.isRecording ? "Stop Recording" : "Start Recording") {
+                            SwiftUI.Button(controller.movieOutput.isRecording ? "Stop Recording" : "Start Recording") {
                                 controller.toggleRecording()
+                                if floating.isShown {
+                                    floating.update { previewStack }
+                                }
                             }
                             .keyboardShortcut(.defaultAction)
                         }
                         Spacer()
-                        Button("Cancel") {
+                        SwiftUI.Button("Cancel") {
                             isPresented = false
                         }
-                        Button("Use This") {
+                        SwiftUI.Button("Use This") {
                             useThis()
                         }
                         .disabled(!hasCapturedData)
@@ -321,6 +395,17 @@ public struct WebcamCaptureSheet: View {
                 }
                 .onDisappear {
                     controller.stop()
+                    floating.hide()
+                }
+                .onChange(of: controller.isRecording) { _ in
+                    if floating.isShown {
+                        floating.update { previewStack }
+                    }
+                }
+                .onChange(of: controller.captureMode) { _ in
+                    if floating.isShown {
+                        floating.update { previewStack }
+                    }
                 }
             }
         }
@@ -353,4 +438,63 @@ public struct WebcamCaptureSheet: View {
             }
         }
     }
+    
+    // The previewStack view used for both inline and floating preview
+    private var previewStack: some SwiftUI.View {
+        ZStack(alignment: .topLeading) {
+            CameraPreviewView(controller: controller)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                )
+            
+            previewOverlay
+                .padding(8)
+        }
+    }
+    
+    // Inline preview reuse
+    private var inlinePreview: some SwiftUI.View {
+        previewStack
+    }
+    
+    // Overlay showing LIVE red dot and mode, plus caption
+    private var previewOverlay: some SwiftUI.View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if controller.isRecording || controller.isRunning {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 10, height: 10)
+                    SwiftUI.Text("LIVE")
+                        .font(.caption).bold()
+                        .foregroundColor(.red)
+                }
+                SwiftUI.Text(modeText)
+                    .font(.caption)
+                    .foregroundColor(.white)
+                    .padding(.leading, (controller.isRecording || controller.isRunning) ? 0 : 16)
+                Spacer()
+            }
+            SwiftUI.Text("This is exactly what will be sent to ChatGPT when you capture.")
+                .font(.caption2)
+                .foregroundColor(Color.white.opacity(0.7))
+                .padding(.top, 2)
+        }
+        .padding(6)
+        .background(Color.black.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .padding(8)
+    }
+    
+    private var modeText: String {
+        switch controller.captureMode {
+        case .photo:
+            return "Photo"
+        case .video:
+            return "Video"
+        }
+    }
 }
+

@@ -10,7 +10,7 @@ struct NeuroDeskAIApp: App {
                 .environmentObject(viewModel)
                 // Explicit tint matches AccentColor asset (HSB: 0.72, 0.6, 1.0)
                 // This coexists with the AccentColor in Assets.xcassets to ensure consistent theming.
-                .tint(.appAccent)
+                .tint(Color.appAccent)
         }
         .windowStyle(.automatic)
     }
