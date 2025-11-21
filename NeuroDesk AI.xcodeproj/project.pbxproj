@@ -6,13 +6,8 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		2236103D2ECF446500A184EC /* NDWebcamCaptureSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2236103C2ECF446500A184EC /* NDWebcamCaptureSheet.swift */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		22337F012EC0EF690064050A /* NeuroDesk AI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "NeuroDesk AI.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		2236103C2ECF446500A184EC /* NDWebcamCaptureSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NDWebcamCaptureSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -39,7 +34,6 @@
 			children = (
 				22337F022EC0EF690064050A /* Products */,
 				22337F3F2EC0EFBE0064050A /* NeuroDesk AI */,
-				2236103C2ECF446500A184EC /* NDWebcamCaptureSheet.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -125,7 +119,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2236103D2ECF446500A184EC /* NDWebcamCaptureSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
